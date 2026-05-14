@@ -221,4 +221,41 @@ mod tests {
         FaultClient::connect_lazy("http://localhost:59999".to_string())
             .expect("valid URI should not fail");
     }
+
+    // ── New tests for coverage ────────────────────────────────────────────────
+
+    #[test]
+    fn fault_client_connect_lazy_invalid_uri_returns_error() {
+        // A URI without a scheme causes Endpoint::from_shared to return Err.
+        let result = FaultClient::connect_lazy("not-a-valid-uri !!".to_string());
+        assert!(result.is_err(), "invalid URI must return Err");
+    }
+
+    #[test]
+    fn fault_notification_all_fields_are_stored() {
+        let n = FaultNotification {
+            workload_id: "my_workload".into(),
+            node_id: "node_x".into(),
+            task_name: "safety_task".into(),
+            fault_type: FaultType::Dmiss,
+        };
+        assert_eq!(n.workload_id, "my_workload");
+        assert_eq!(n.node_id, "node_x");
+        assert_eq!(n.task_name, "safety_task");
+    }
+
+    #[tokio::test]
+    async fn mock_notifier_records_node_id_correctly() {
+        let notifier = MockFaultNotifier::arc();
+        notifier
+            .notify_fault(FaultNotification {
+                workload_id: "w".into(),
+                node_id: "expected_node".into(),
+                task_name: "t".into(),
+                fault_type: FaultType::Dmiss,
+            })
+            .await
+            .unwrap();
+        assert_eq!(notifier.calls.lock().unwrap()[0].node_id, "expected_node");
+    }
 }

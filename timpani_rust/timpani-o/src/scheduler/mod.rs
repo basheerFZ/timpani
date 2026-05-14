@@ -1042,4 +1042,199 @@ nodes:
             .unwrap_err();
         assert!(matches!(err, SchedulerError::ConfigNotLoaded));
     }
+
+    // ── New tests for coverage ────────────────────────────────────────────────
+
+    // ── sorted_cpus (lines 605–632 — entire public helper) ───────────────────
+
+    #[test]
+    fn sorted_cpus_prefer_high_util_returns_most_loaded_first() {
+        let avail: AvailCpus = [("node01".to_string(), vec![2u32, 3])]
+            .into_iter()
+            .collect();
+        let mut cpu_map = BTreeMap::new();
+        cpu_map.insert(2u32, 0.5f64);
+        cpu_map.insert(3u32, 0.1f64);
+        let util: CpuUtil = [("node01".to_string(), cpu_map)].into_iter().collect();
+
+        let result = GlobalScheduler::sorted_cpus("node01", &avail, &util, true);
+        // prefer_high_util=true → CPU 2 (0.5) before CPU 3 (0.1)
+        assert_eq!(result, vec![2, 3]);
+    }
+
+    #[test]
+    fn sorted_cpus_prefer_low_util_returns_least_loaded_first() {
+        let avail: AvailCpus = [("node01".to_string(), vec![2u32, 3])]
+            .into_iter()
+            .collect();
+        let mut cpu_map = BTreeMap::new();
+        cpu_map.insert(2u32, 0.5f64);
+        cpu_map.insert(3u32, 0.1f64);
+        let util: CpuUtil = [("node01".to_string(), cpu_map)].into_iter().collect();
+
+        let result = GlobalScheduler::sorted_cpus("node01", &avail, &util, false);
+        // prefer_high_util=false → CPU 3 (0.1) before CPU 2 (0.5)
+        assert_eq!(result, vec![3, 2]);
+    }
+
+    #[test]
+    fn sorted_cpus_unknown_node_returns_empty() {
+        let avail: AvailCpus = BTreeMap::new();
+        let util: CpuUtil = BTreeMap::new();
+        let result = GlobalScheduler::sorted_cpus("ghost", &avail, &util, true);
+        assert!(result.is_empty());
+    }
+
+    // ── NoAvailableCpu via target_node_priority (lines 211–215) ──────────────
+    // Fill both CPUs on node01 past the 90% threshold, then a 3rd task
+    // on node01 finds no CPU to land on.
+
+    #[test]
+    fn target_node_priority_no_cpu_available_returns_error() {
+        let sched = two_node_scheduler();
+        // node01 has CPUs [2, 3]. Pin each task to a distinct CPU at 95% util.
+        let fill_cpu2 = Task {
+            name: "fill_cpu2".to_string(),
+            workload_id: "w".to_string(),
+            target_node: "node01".to_string(),
+            affinity: CpuAffinity::Pinned(1 << 2), // CPU 2
+            period_us: 10_000,
+            runtime_us: 9_500, // 95% > 90% threshold — blocks pinned path
+            deadline_us: 10_000,
+            ..Default::default()
+        };
+        let fill_cpu3 = Task {
+            name: "fill_cpu3".to_string(),
+            workload_id: "w".to_string(),
+            target_node: "node01".to_string(),
+            affinity: CpuAffinity::Pinned(1 << 3), // CPU 3
+            period_us: 10_000,
+            runtime_us: 9_500,
+            deadline_us: 10_000,
+            ..Default::default()
+        };
+        // Both CPUs are now above threshold; a 3rd task has nowhere to go.
+        let overflow = Task {
+            name: "overflow".to_string(),
+            workload_id: "w".to_string(),
+            target_node: "node01".to_string(),
+            period_us: 10_000,
+            runtime_us: 1_000,
+            deadline_us: 10_000,
+            ..Default::default()
+        };
+        let err = sched
+            .schedule(vec![fill_cpu2, fill_cpu3, overflow], "target_node_priority")
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SchedulerError::AdmissionRejected {
+                    reason: AdmissionReason::NoAvailableCpu,
+                    ..
+                }
+            ),
+            "expected NoAvailableCpu, got: {err}"
+        );
+    }
+
+    // ── CpuAffinityUnavailable (lines 468–469) ────────────────────────────────
+    // Pin task to CPU 0; node01 only has CPUs [2, 3] → rejected immediately.
+
+    #[test]
+    fn admission_rejects_pinned_cpu_not_on_node() {
+        let sched = two_node_scheduler();
+        let task = Task {
+            name: "bad_pin".to_string(),
+            workload_id: "w".to_string(),
+            target_node: "node01".to_string(),
+            affinity: CpuAffinity::Pinned(1 << 0), // CPU 0 — not in [2, 3]
+            period_us: 10_000,
+            runtime_us: 1_000,
+            deadline_us: 10_000,
+            ..Default::default()
+        };
+        let err = sched
+            .schedule(vec![task], "target_node_priority")
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SchedulerError::AdmissionRejected {
+                    reason: AdmissionReason::CpuAffinityUnavailable { .. },
+                    ..
+                }
+            ),
+            "expected CpuAffinityUnavailable, got: {err}"
+        );
+    }
+
+    // ── least_loaded: NoSchedulableNode (lines 268–269) ──────────────────────
+    // Memory exceeds every node → no node qualifies → error.
+
+    #[test]
+    fn least_loaded_no_schedulable_node_returns_error() {
+        let sched = two_node_scheduler();
+        // node01 max=4096 MB, node02 max=8192 MB; require 99 999 MB
+        let task = Task {
+            name: "huge".to_string(),
+            workload_id: "w".to_string(),
+            memory_mb: 99_999,
+            period_us: 10_000,
+            runtime_us: 1_000,
+            ..Default::default()
+        };
+        let err = sched.schedule(vec![task], "least_loaded").unwrap_err();
+        assert!(
+            matches!(err, SchedulerError::NoSchedulableNode { .. }),
+            "expected NoSchedulableNode, got: {err}"
+        );
+    }
+
+    // ── best_fit_decreasing: NoSchedulableNode (lines 358–359) ───────────────
+
+    #[test]
+    fn best_fit_decreasing_no_schedulable_node_returns_error() {
+        let sched = two_node_scheduler();
+        let task = Task {
+            name: "huge".to_string(),
+            workload_id: "w".to_string(),
+            memory_mb: 99_999,
+            period_us: 10_000,
+            runtime_us: 1_000,
+            ..Default::default()
+        };
+        let err = sched
+            .schedule(vec![task], "best_fit_decreasing")
+            .unwrap_err();
+        assert!(
+            matches!(err, SchedulerError::NoSchedulableNode { .. }),
+            "expected NoSchedulableNode, got: {err}"
+        );
+    }
+
+    // ── best_fit_decreasing: target_node fallback warning (lines 391–396) ────
+    // target_node=node01 (max 4096 MB) but task needs 5000 MB
+    // → admission fails for node01 → algorithm warns and falls back to node02.
+
+    #[test]
+    fn best_fit_decreasing_falls_back_when_target_node_unavailable() {
+        let sched = two_node_scheduler();
+        let task = Task {
+            name: "fallback".to_string(),
+            workload_id: "w".to_string(),
+            target_node: "node01".to_string(), // will be rejected (memory)
+            memory_mb: 5_000,                  // node01 max=4096 MB
+            period_us: 10_000,
+            runtime_us: 1_000,
+            ..Default::default()
+        };
+        let map = sched.schedule(vec![task], "best_fit_decreasing").unwrap();
+        // Should have fallen back to node02 (max 8192 MB)
+        assert!(
+            map.contains_key("node02"),
+            "expected task to fall back to node02"
+        );
+        assert!(!map.contains_key("node01"));
+    }
 }

@@ -70,6 +70,16 @@ struct Cli {
     node_config: Option<PathBuf>,
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Build the full URI used to reach Pullpiri's FaultService.
+///
+/// Extracted into a free function so it can be unit-tested without spinning
+/// up an async runtime.
+fn build_pullpiri_addr(host: &str, port: u16) -> String {
+    format!("http://{}:{}", host, port)
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -139,7 +149,7 @@ async fn main() {
     let workload_store = new_workload_store();
 
     // ── Fault client (lazy — connects to Pullpiri on first RPC call) ──────────
-    let pullpiri_addr = format!("http://{}:{}", cli.fault_host, cli.fault_port);
+    let pullpiri_addr = build_pullpiri_addr(&cli.fault_host, cli.fault_port);
     let fault_notifier = match FaultClient::connect_lazy(pullpiri_addr.clone()) {
         Ok(n) => n,
         Err(e) => {
@@ -252,5 +262,85 @@ async fn main() {
             error!("Server error: {e}");
             process::exit(1);
         }
+    }
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    // ── build_pullpiri_addr ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_pullpiri_addr_formats_correctly() {
+        assert_eq!(
+            build_pullpiri_addr("localhost", 50053),
+            "http://localhost:50053"
+        );
+    }
+
+    #[test]
+    fn build_pullpiri_addr_custom_host_and_port() {
+        assert_eq!(
+            build_pullpiri_addr("10.0.0.5", 9090),
+            "http://10.0.0.5:9090"
+        );
+    }
+
+    // ── CLI argument parsing via try_parse_from ───────────────────────────────
+    // Uses clap's try_parse_from so we can parse a &[&str] in a unit test
+    // without touching the process argv.
+
+    #[test]
+    fn cli_defaults_are_sane() {
+        let cli = Cli::try_parse_from(["timpani-o"]).unwrap();
+        assert_eq!(cli.sinfo_port, 50052);
+        assert_eq!(cli.fault_host, "localhost");
+        assert_eq!(cli.fault_port, 50053);
+        assert_eq!(cli.node_port, 50054);
+        assert!(!cli.notify_fault);
+        assert!(cli.node_config.is_none());
+        assert_eq!(
+            cli.sync_timeout_secs,
+            timpani_o::grpc::node_service::DEFAULT_SYNC_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn cli_short_flags_are_parsed() {
+        let cli = Cli::try_parse_from([
+            "timpani-o",
+            "-s",
+            "9001",
+            "-f",
+            "10.0.0.1",
+            "-p",
+            "9002",
+            "-d",
+            "9003",
+        ])
+        .unwrap();
+        assert_eq!(cli.sinfo_port, 9001);
+        assert_eq!(cli.fault_host, "10.0.0.1");
+        assert_eq!(cli.fault_port, 9002);
+        assert_eq!(cli.node_port, 9003);
+    }
+
+    #[test]
+    fn cli_nodeconfig_flag_sets_path() {
+        let cli = Cli::try_parse_from(["timpani-o", "--nodeconfig", "/tmp/nodes.yaml"]).unwrap();
+        assert_eq!(
+            cli.node_config.unwrap().to_str().unwrap(),
+            "/tmp/nodes.yaml"
+        );
+    }
+
+    #[test]
+    fn cli_notifyfault_flag_enables_feature() {
+        let cli = Cli::try_parse_from(["timpani-o", "-n"]).unwrap();
+        assert!(cli.notify_fault);
     }
 }

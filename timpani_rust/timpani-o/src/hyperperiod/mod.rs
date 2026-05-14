@@ -478,4 +478,68 @@ mod tests {
         let info = mgr.calculate_hyperperiod("w1", &tasks).unwrap();
         assert_eq!(info.unique_periods, vec![1_000, 2_000, 5_000]);
     }
+
+    // ── New tests for coverage ────────────────────────────────────────────────
+
+    // Display impl — all three HyperperiodError arms (lines 60–72)
+
+    #[test]
+    fn hyperperiod_error_no_valid_periods_display() {
+        let s = HyperperiodError::NoValidPeriods.to_string();
+        assert!(s.contains("non-zero"), "got: {s}");
+    }
+
+    #[test]
+    fn hyperperiod_error_overflow_display() {
+        let s = HyperperiodError::Overflow { a: 100, b: 200 }.to_string();
+        assert!(s.contains("100") && s.contains("200"), "got: {s}");
+    }
+
+    #[test]
+    fn hyperperiod_error_too_large_display() {
+        let s = HyperperiodError::TooLarge {
+            value_us: 7_000_000,
+            limit_us: 5_000_000,
+        }
+        .to_string();
+        // Should contain the numeric values
+        assert!(s.contains("7000000") || s.contains("7.0"), "got: {s}");
+        assert!(s.contains("5000000") || s.contains("5.0"), "got: {s}");
+    }
+
+    // Default trait impl (lines 268–269)
+
+    #[test]
+    fn hyperperiod_manager_default_equals_new() {
+        let mgr: HyperperiodManager = Default::default();
+        assert!(mgr.get("anything").is_none());
+        assert!(!mgr.has("anything"));
+        assert_eq!(mgr.all().len(), 0);
+    }
+
+    // clear_all on an already-empty map — exercises the `if !is_empty` false branch
+
+    #[test]
+    fn clear_all_on_empty_map_is_noop() {
+        let mut mgr = HyperperiodManager::new();
+        mgr.clear_all(); // must not panic
+        assert_eq!(mgr.all().len(), 0);
+    }
+
+    // calculate_hyperperiod with 3 distinct periods — iterates the debug loop
+    // more than once, covering the loop body that was previously missed
+
+    #[test]
+    fn hyperperiod_multiple_unique_periods_debug_loop() {
+        let tasks = vec![
+            make_task("w1", 1_000),
+            make_task("w1", 3_000),
+            make_task("w1", 7_000),
+        ];
+        let mut mgr = HyperperiodManager::new();
+        let info = mgr.calculate_hyperperiod("w1", &tasks).unwrap();
+        assert_eq!(info.unique_periods.len(), 3);
+        // LCM(1000, 3000, 7000) = 21000
+        assert_eq!(info.hyperperiod_us, 21_000);
+    }
 }
