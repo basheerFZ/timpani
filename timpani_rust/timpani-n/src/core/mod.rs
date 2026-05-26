@@ -33,7 +33,7 @@ const CALIBRATION_SAMPLES: usize = 20;
 /// CLOCK_MONOTONIC (used by BPF) and CLOCK_REALTIME.
 ///
 /// This function takes multiple samples and uses the one with the smallest
-/// delta (fastest measurement) to minimize timing jitter and context switch impact..
+/// delta (fastest measurement) to minimize timing jitter and context switch impact.
 ///
 /// # Returns
 /// - `Ok(())` on successful calibration
