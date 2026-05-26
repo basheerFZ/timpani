@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod context;
+pub mod core;
 pub mod error;
 pub mod grpc;
 pub mod proto;
