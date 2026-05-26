@@ -6,6 +6,13 @@ on:
   pull_request:
     
 permissions: write-all
+
+# Cancel any in-progress run for the same branch/PR when a new commit is pushed.
+# This prevents stuck tarpaulin runs from piling up and blocking new ones.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   #  Job 1: Detect file changes and conditionally trigger jobs based on them
   detect-changes:
@@ -58,10 +65,22 @@ jobs:
   ci-summary:
     name: CI Complete Summary
     runs-on: ubuntu-latest
-    if: always()  # Run even if earlier jobs were skipped or failed
+    # 'always()' ensures this runs even when all upstream jobs were skipped.
+    # Without this condition GitHub may fail to queue the summary job when
+    # every needs-job is skipped (no matching file changes).
+    if: always()
     needs:
+      - detect-changes
       - run-rust-ci
       - run-doc-lint
       - run-yaml-validation
     steps:
-      - run: echo " All CI jobs (if triggered) have completed."
+      - name: Report CI outcome
+        run: |
+          echo "rust_changed : ${{ needs.detect-changes.outputs.rust_changed }}"
+          echo "doc_changed  : ${{ needs.detect-changes.outputs.doc_changed }}"
+          echo "yaml_changed : ${{ needs.detect-changes.outputs.yaml_changed }}"
+          echo "rust-ci      : ${{ needs.run-rust-ci.result }}"
+          echo "doc-lint     : ${{ needs.run-doc-lint.result }}"
+          echo "yaml-validate: ${{ needs.run-yaml-validation.result }}"
+          echo "All CI jobs (if triggered) have completed."
