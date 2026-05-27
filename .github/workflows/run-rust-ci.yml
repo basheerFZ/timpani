@@ -149,6 +149,80 @@ jobs:
           name: coverage-${{ matrix.package }}
           path: dist/coverage/
 
+  # ── Job 3: Combined coverage summary (runs after both matrix jobs) ─────────
+  coverage-summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: coverage          # wait for both matrix jobs to finish
+
+    steps:
+      - name: Download timpani-n coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-timpani-n
+          path: coverage/timpani-n
+
+      - name: Download timpani-o coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-timpani-o
+          path: coverage/timpani-o
+
+      - name: Install lcov
+        run: sudo apt-get install -y --no-install-recommends lcov
+
+      - name: Merge lcov reports
+        run: |
+          lcov \
+            --add-tracefile coverage/timpani-n/workspace/lcov.info \
+            --add-tracefile coverage/timpani-o/workspace/lcov.info \
+            --output-file coverage/combined.info
+
+      - name: Generate combined HTML report
+        run: genhtml coverage/combined.info --output-directory coverage/combined-html
+
+      - name: Print coverage summary to Actions UI
+        run: |
+          # ── Individual summaries ──────────────────────────────────────────
+          N_RAW=$(lcov --summary coverage/timpani-n/workspace/lcov.info 2>&1)
+          N_LINES=$(echo "$N_RAW"  | grep -oP 'lines\.*:\s*\K[\d.]+%'     || echo "n/a")
+          N_FUNCS=$(echo "$N_RAW"  | grep -oP 'functions\.*:\s*\K[\d.]+%' || echo "n/a")
+
+          O_RAW=$(lcov --summary coverage/timpani-o/workspace/lcov.info 2>&1)
+          O_LINES=$(echo "$O_RAW"  | grep -oP 'lines\.*:\s*\K[\d.]+%'     || echo "n/a")
+          O_FUNCS=$(echo "$O_RAW"  | grep -oP 'functions\.*:\s*\K[\d.]+%' || echo "n/a")
+
+          C_RAW=$(lcov --summary coverage/combined.info 2>&1)
+          C_LINES=$(echo "$C_RAW"  | grep -oP 'lines\.*:\s*\K[\d.]+%'     || echo "n/a")
+          C_FUNCS=$(echo "$C_RAW"  | grep -oP 'functions\.*:\s*\K[\d.]+%' || echo "n/a")
+
+          # ── Write to GitHub Actions Step Summary ─────────────────────────
+          {
+            echo "## 📊 Coverage Report"
+            echo ""
+            echo "| Package | Lines | Functions |"
+            echo "|---------|------:|----------:|"
+            echo "| timpani-n       | $N_LINES | $N_FUNCS |"
+            echo "| timpani-o       | $O_LINES | $O_FUNCS |"
+            echo "| **Combined**    | **$C_LINES** | **$C_FUNCS** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Also print to the log ─────────────────────────────────────────
+          echo "┌─────────────┬──────────┬───────────┐"
+          echo "│ Package     │  Lines   │ Functions │"
+          echo "├─────────────┼──────────┼───────────┤"
+          printf "│ %-11s │ %8s │ %9s │\n" "timpani-n" "$N_LINES" "$N_FUNCS"
+          printf "│ %-11s │ %8s │ %9s │\n" "timpani-o" "$O_LINES" "$O_FUNCS"
+          echo "├─────────────┼──────────┼───────────┤"
+          printf "│ %-11s │ %8s │ %9s │\n" "Combined" "$C_LINES" "$C_FUNCS"
+          echo "└─────────────┴──────────┴───────────┘"
+
+      - name: Upload combined coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-combined
+          path: coverage/combined-html/
+
       # - name: Set up QEMU
       #   uses: docker/setup-qemu-action@v3
 
