@@ -2,7 +2,7 @@ name: Rust CI Reusable Workflow
 
 on:
   workflow_call:
-  workflow_dispatch: 
+  workflow_dispatch:
 
 permissions:
   packages: write
@@ -12,9 +12,10 @@ env:
   IMAGE_NAME: ${{ github.repository }}-rust
 
 jobs:
+  # ── Job 1: Build, test, lint ──────────────────────────────────────────────
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -24,6 +25,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache cargo registry + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+            ${{ runner.os }}-cargo-
 
       - name: Make scripts executable
         run: chmod +x scripts/*.sh
@@ -36,7 +50,6 @@ jobs:
           mkdir -p dist/reports/fmt
           mkdir -p dist/reports/deny
           mkdir -p dist/tests
-          mkdir -p dist/coverage/workspace
           mkdir -p dist/reports/clippy
 
       - name: Build and parse project
@@ -53,9 +66,6 @@ jobs:
 
       - name: Run cargo-deny checks
         run: ./scripts/deny_check.sh
-
-      - name: Run test coverage script
-        run: ./scripts/test_coverage.sh
 
       - name: Upload deny report
         if: always()
@@ -85,12 +95,174 @@ jobs:
           name: test-report
           path: dist/tests/*
 
-      - name: Upload coverage reports
+  # ── Job 2: Coverage — runs timpani-n and timpani-o in parallel ────────────
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false          # let both packages report even if one fails
+      matrix:
+        package: [timpani-n, timpani-o]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache key is per-package so the two matrix jobs don't overwrite each
+      # other's target/ directory.  ~/.cargo/bin caches the tarpaulin binary.
+      - name: Cache cargo + tarpaulin binary
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-${{ matrix.package }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Install project dependencies
+        run: ./scripts/installdeps.sh
+
+      - name: Create coverage output folder
+        run: mkdir -p dist/coverage/workspace
+
+      # TARPAULIN_PACKAGES is read by test_coverage.sh to select which package
+      # to instrument.  The script handles install, engine, timeout, and threshold.
+      - name: Run coverage for ${{ matrix.package }}
+        env:
+          TARPAULIN_PACKAGES: ${{ matrix.package }}
+        run: ./scripts/test_coverage.sh
+
+      - name: Upload coverage report (${{ matrix.package }})
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
-          path: dist/coverage/*
+          name: coverage-${{ matrix.package }}
+          path: dist/coverage/
+
+  # ── Job 3: Combined coverage summary (runs after both matrix jobs) ─────────
+  coverage-summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: coverage
+    # Run even if one or both coverage jobs failed (e.g. below threshold).
+    # This ensures the combined report is always generated for visibility.
+    if: always() && !contains(needs.coverage.result, 'cancelled')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download timpani-n coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-timpani-n
+          path: coverage/timpani-n
+
+      - name: Download timpani-o coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-timpani-o
+          path: coverage/timpani-o
+
+      - name: Install lcov
+        run: sudo apt-get install -y --no-install-recommends lcov
+
+      - name: Merge lcov reports
+        run: |
+          # Collect whichever lcov files were actually produced (one or both may
+          # be missing if a package job failed before writing the report).
+          INPUTS=()
+          for f in \
+            coverage/timpani-n/workspace/lcov.info \
+            coverage/timpani-o/workspace/lcov.info; do
+            [[ -f "$f" ]] && INPUTS+=(--add-tracefile "$f") \
+              || echo "⚠️  $f not found — skipping"
+          done
+          if [[ ${#INPUTS[@]} -eq 0 ]]; then
+            echo "::error ::No lcov files found — cannot produce combined report"
+            exit 1
+          fi
+          lcov "${INPUTS[@]}" --output-file coverage/combined.info
+
+      - name: Generate combined HTML report
+        run: genhtml coverage/combined.info --output-directory coverage/combined-html
+
+      - name: Print coverage summary to Actions UI
+        run: |
+          COVERAGE_THRESHOLD=80
+
+          lcov_pct() {
+            local file="$1" metric="$2"
+            if [[ -f "$file" ]]; then
+              lcov --summary "$file" 2>&1 | grep -oP "${metric}\.*:\s*\K[\d.]+%" || echo "n/a"
+            else
+              echo "missing"
+            fi
+          }
+
+          N_LINES=$(lcov_pct coverage/timpani-n/workspace/lcov.info "lines")
+          N_FUNCS=$(lcov_pct coverage/timpani-n/workspace/lcov.info "functions")
+          O_LINES=$(lcov_pct coverage/timpani-o/workspace/lcov.info "lines")
+          O_FUNCS=$(lcov_pct coverage/timpani-o/workspace/lcov.info "functions")
+          C_LINES=$(lcov_pct coverage/combined.info "lines")
+          C_FUNCS=$(lcov_pct coverage/combined.info "functions")
+
+          # Strip trailing % for numeric comparison
+          C_PCT=$(echo "$C_LINES" | tr -d '%')
+
+          # ── Write to GitHub Actions Step Summary ─────────────────────────
+          {
+            echo "## 📊 Coverage Report"
+            echo ""
+            echo "| Package | Lines | Functions |"
+            echo "|---------|------:|----------:|"
+            echo "| timpani-n       | $N_LINES | $N_FUNCS |"
+            echo "| timpani-o       | $O_LINES | $O_FUNCS |"
+            echo "| **Combined**    | **$C_LINES** | **$C_FUNCS** |"
+            echo ""
+            echo "> Threshold: **${COVERAGE_THRESHOLD}%**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Also print to the log ─────────────────────────────────────────
+          echo "┌─────────────┬──────────┬───────────┐"
+          echo "│ Package     │  Lines   │ Functions │"
+          echo "├─────────────┼──────────┼───────────┤"
+          printf "│ %-11s │ %8s │ %9s │\n" "timpani-n" "$N_LINES" "$N_FUNCS"
+          printf "│ %-11s │ %8s │ %9s │\n" "timpani-o" "$O_LINES" "$O_FUNCS"
+          echo "├─────────────┼──────────┼───────────┤"
+          printf "│ %-11s │ %8s │ %9s │\n" "Combined" "$C_LINES" "$C_FUNCS"
+          echo "└─────────────┴──────────┴───────────┘"
+
+          # ── Threshold check ───────────────────────────────────────────────
+          if [[ "$C_PCT" == "n/a" || "$C_PCT" == "missing" ]]; then
+            echo "::error ::Could not determine combined coverage — failing"
+            exit 1
+          fi
+          PASS=$(awk -v cov="$C_PCT" -v thr="$COVERAGE_THRESHOLD" \
+            'BEGIN { print (cov >= thr) ? "yes" : "no" }')
+          if [[ "$PASS" == "yes" ]]; then
+            echo "✅ Combined coverage ${C_LINES} >= ${COVERAGE_THRESHOLD}% — passed"
+          else
+            echo "::error ::Combined coverage ${C_LINES} is below the required ${COVERAGE_THRESHOLD}% threshold"
+            exit 1
+          fi
+
+      - name: Upload combined coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-combined
+          path: coverage/combined-html/
 
       # - name: Set up QEMU
       #   uses: docker/setup-qemu-action@v3

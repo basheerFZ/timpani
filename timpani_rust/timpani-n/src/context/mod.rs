@@ -204,9 +204,13 @@ impl Context {
             warn!("Scheduling policy not modified (prio=-1 means default)");
         }
 
+        // Calibrate BPF time offset for timestamp conversion
+        info!("Calibrating BPF time offset");
+        crate::core::calibrate_time_offset()?;
+
         // TODO: Add additional initialization logic as we port more modules:
-        // - calibrate_bpf_time_offset
         // - init_task_list
+        // - apex_monitor_init
 
         Ok(())
     }
