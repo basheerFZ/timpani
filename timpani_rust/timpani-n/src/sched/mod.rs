@@ -627,4 +627,133 @@ mod tests {
         // May fail if system doesn't have that many CPUs, but shouldn't panic
         assert!(result.is_ok() || result.is_err());
     }
+
+    // ── A: Affinity read-back ─────────────────────────────────────────────────
+
+    #[test]
+    fn set_affinity_cpu0_and_read_back() {
+        let pid = Pid::from_raw(std::process::id() as libc::pid_t);
+        let original = nix::sched::sched_getaffinity(pid).ok();
+        if set_affinity_cpumask(pid, 0x1).is_ok() {
+            let mask = nix::sched::sched_getaffinity(pid)
+                .expect("sched_getaffinity must succeed after setting cpu_affinity=0x1");
+            assert!(
+                matches!(mask.is_set(0), Ok(true)),
+                "CPU 0 must be set when mask=0x1"
+            );
+            let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+            for i in 1..num_cpus.min(64) {
+                assert!(
+                    matches!(mask.is_set(i), Ok(false)),
+                    "CPU {i} must not be set when mask=0x1"
+                );
+            }
+        }
+        if let Some(ref orig) = original {
+            let _ = nix::sched::sched_setaffinity(pid, orig);
+        }
+    }
+
+    #[test]
+    fn set_affinity_full_mask_and_read_back() {
+        let pid = Pid::from_raw(std::process::id() as libc::pid_t);
+        let original = nix::sched::sched_getaffinity(pid).ok();
+        let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+        if set_affinity_cpumask(pid, !0u64).is_ok() {
+            let mask = nix::sched::sched_getaffinity(pid)
+                .expect("sched_getaffinity must succeed after full-mask set");
+            for i in 0..num_cpus.min(64) {
+                assert!(
+                    matches!(mask.is_set(i), Ok(true)),
+                    "CPU {i} must be set in full-CPU mask"
+                );
+            }
+        }
+        if let Some(ref orig) = original {
+            let _ = nix::sched::sched_setaffinity(pid, orig);
+        }
+    }
+
+    // ── B: Scheduler attribute read-back ─────────────────────────────────────
+
+    #[test]
+    fn set_schedattr_normal_and_verify() {
+        let pid = Pid::from_raw(std::process::id() as libc::pid_t);
+        // Save current policy so we can restore it afterward.
+        let orig_policy = unsafe { libc::sched_getscheduler(pid.as_raw()) };
+        let mut orig_param = libc::sched_param { sched_priority: 0 };
+        unsafe { libc::sched_getparam(pid.as_raw(), &mut orig_param) };
+
+        // Switching to SCHED_NORMAL (prio 0) never requires CAP_SYS_NICE.
+        if set_schedattr(pid, 0, SchedPolicy::Normal).is_ok() {
+            let policy = unsafe { libc::sched_getscheduler(pid.as_raw()) };
+            assert_eq!(
+                policy,
+                libc::SCHED_OTHER,
+                "sched_getscheduler must return SCHED_OTHER after set to Normal"
+            );
+            let mut param = libc::sched_param { sched_priority: 0 };
+            unsafe { libc::sched_getparam(pid.as_raw(), &mut param) };
+            assert_eq!(
+                param.sched_priority, 0,
+                "priority must be 0 for SCHED_NORMAL"
+            );
+        }
+
+        // Restore — best-effort, ignore error (may lack privileges for RT restore).
+        if orig_policy >= 0 {
+            let restore = SchedPolicy::try_from(orig_policy).unwrap_or(SchedPolicy::Normal);
+            let _ = set_schedattr(pid, orig_param.sched_priority as u32, restore);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires CAP_SYS_NICE; run with: cargo test -- --ignored"]
+    fn set_schedattr_fifo_and_verify() {
+        let pid = Pid::from_raw(std::process::id() as libc::pid_t);
+        let orig_policy = unsafe { libc::sched_getscheduler(pid.as_raw()) };
+        let mut orig_param = libc::sched_param { sched_priority: 0 };
+        unsafe { libc::sched_getparam(pid.as_raw(), &mut orig_param) };
+
+        set_schedattr(pid, 50, SchedPolicy::Fifo).expect("CAP_SYS_NICE required");
+
+        let policy = unsafe { libc::sched_getscheduler(pid.as_raw()) };
+        assert_eq!(
+            policy,
+            libc::SCHED_FIFO,
+            "expected SCHED_FIFO after set_schedattr(Fifo, 50)"
+        );
+        let mut param = libc::sched_param { sched_priority: 0 };
+        unsafe { libc::sched_getparam(pid.as_raw(), &mut param) };
+        assert_eq!(param.sched_priority, 50, "expected priority 50");
+
+        // Restore
+        let restore = SchedPolicy::try_from(orig_policy).unwrap_or(SchedPolicy::Normal);
+        let _ = set_schedattr(pid, orig_param.sched_priority as u32, restore);
+    }
+
+    #[test]
+    #[ignore = "requires CAP_SYS_NICE; run with: cargo test -- --ignored"]
+    fn set_schedattr_rr_and_verify() {
+        let pid = Pid::from_raw(std::process::id() as libc::pid_t);
+        let orig_policy = unsafe { libc::sched_getscheduler(pid.as_raw()) };
+        let mut orig_param = libc::sched_param { sched_priority: 0 };
+        unsafe { libc::sched_getparam(pid.as_raw(), &mut orig_param) };
+
+        set_schedattr(pid, 30, SchedPolicy::Rr).expect("CAP_SYS_NICE required");
+
+        let policy = unsafe { libc::sched_getscheduler(pid.as_raw()) };
+        assert_eq!(
+            policy,
+            libc::SCHED_RR,
+            "expected SCHED_RR after set_schedattr(Rr, 30)"
+        );
+        let mut param = libc::sched_param { sched_priority: 0 };
+        unsafe { libc::sched_getparam(pid.as_raw(), &mut param) };
+        assert_eq!(param.sched_priority, 30, "expected priority 30");
+
+        // Restore
+        let restore = SchedPolicy::try_from(orig_policy).unwrap_or(SchedPolicy::Normal);
+        let _ = set_schedattr(pid, orig_param.sched_priority as u32, restore);
+    }
 }

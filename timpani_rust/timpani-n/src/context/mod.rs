@@ -8,6 +8,7 @@ use std::time::Instant;
 use crate::config::Config;
 use crate::grpc::NodeClient;
 use crate::sched::{set_affinity, set_schedattr, SchedPolicy};
+use crate::task::TimeTrigger;
 use nix::unistd::Pid;
 use tracing::{info, warn};
 
@@ -20,7 +21,9 @@ use tracing::{info, warn};
 /// Will move to `task/mod.rs` when that module is implemented.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskInfo {
-    /// Task name.  At most 16 chars (TINFO_NAME_MAX); truncated at construction.
+    /// Task name.  Certain conversion helpers (e.g. `task_from_proto`) may truncate
+    /// this to at most 16 chars (`TINFO_NAME_MAX`), but `TaskInfo` itself does not
+    /// enforce that limit.
     pub name: String,
     /// Linux scheduling policy (0 = NORMAL, 1 = FIFO, 2 = RR).
     pub sched_policy: u32,
@@ -108,8 +111,10 @@ pub struct RuntimeState {
     pub sched_info: Option<SchedInfo>,
     /// Barrier start time from SyncTimer.  None if enable_sync=false or sync not yet done.
     pub sync_start: Option<SyncStartTime>,
+    /// Runtime task list.  Empty until init_task_list() succeeds after GetSchedInfo.
+    /// Rebuilt on every workload change detected in the polling loop.
+    pub tt_list: Vec<TimeTrigger>,
     // TODO: Add fields as we port more modules:
-    // - tt_list (time trigger task list — task module)
     // - apex_list (Apex.OS task list — apex module)
 }
 
