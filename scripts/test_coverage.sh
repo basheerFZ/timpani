@@ -15,9 +15,34 @@ echo "🧪 Starting test coverage collection..." | tee -a "$LOG_FILE"
 
 cd "$PROJECT_ROOT/timpani_rust"
 
+# Pinned version — change here to upgrade everywhere.
+TARPAULIN_VERSION="0.32.7"
+
+# Install via pre-built binary (seconds) instead of compiling from source (3-5 min).
+# Falls back to cargo install if the binary download fails.
+install_tarpaulin() {
+  local arch
+  arch=$(uname -m)  # x86_64 or aarch64
+  local url="https://github.com/xd009642/tarpaulin/releases/download/${TARPAULIN_VERSION}/cargo-tarpaulin-${arch}-unknown-linux-musl.tar.gz"
+  echo "📦 Downloading cargo-tarpaulin ${TARPAULIN_VERSION} (pre-built)..." | tee -a "$LOG_FILE"
+  if curl -fsSL "$url" | tar -xz -C "${HOME}/.cargo/bin"; then
+    echo "✅ cargo-tarpaulin ${TARPAULIN_VERSION} installed from pre-built binary" | tee -a "$LOG_FILE"
+  else
+    echo "⚠️  Binary download failed, falling back to cargo install (slow)..." | tee -a "$LOG_FILE"
+    cargo install cargo-tarpaulin --version "$TARPAULIN_VERSION" --locked
+  fi
+}
+
 if ! command -v cargo-tarpaulin &>/dev/null; then
-  echo "📦 Installing cargo-tarpaulin..." | tee -a "$LOG_FILE"
-  cargo install cargo-tarpaulin
+  install_tarpaulin
+else
+  INSTALLED=$(cargo-tarpaulin --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || echo "unknown")
+  if [[ "$INSTALLED" != "$TARPAULIN_VERSION" ]]; then
+    echo "🔄 Replacing cargo-tarpaulin $INSTALLED → $TARPAULIN_VERSION" | tee -a "$LOG_FILE"
+    install_tarpaulin
+  else
+    echo "✅ cargo-tarpaulin $INSTALLED already installed" | tee -a "$LOG_FILE"
+  fi
 fi
 
 export RUSTC_BOOTSTRAP=1
@@ -27,20 +52,30 @@ COVERAGE_THRESHOLD=80
 echo "📂 Running tarpaulin for workspace" | tee -a "$LOG_FILE"
 mkdir -p "$COVERAGE_ROOT/workspace"
 
-TARPAULIN_OUTPUT=$(cargo tarpaulin --packages timpani-n timpani-o --out Html --out Lcov --out Xml \
+TARPAULIN_RAW_LOG="$COVERAGE_ROOT/workspace/tarpaulin_raw.log"
+
+# Stream tarpaulin output live (visible in CI logs) while also saving to file.
+# --engine llvm : compile-time instrumentation; avoids ptrace which hangs with tokio async tests.
+# --timeout 120 : kill any single test that exceeds 120 s — prevents infinite hangs.
+# --skip-clean  : reuse existing build artifacts for faster reruns.
+set +e
+cargo tarpaulin --packages timpani-n timpani-o --out Html --out Lcov --out Xml \
   --output-dir "$COVERAGE_ROOT/workspace" \
+  --engine llvm --timeout 120 --skip-clean \
   --ignore-panics --no-fail-fast \
-  2>&1) || {
-  echo "$TARPAULIN_OUTPUT" | tee -a "$LOG_FILE"
-  echo "::error ::tarpaulin failed or no tests found" | tee -a "$LOG_FILE"
+  2>&1 | tee -a "$LOG_FILE" "$TARPAULIN_RAW_LOG"
+TARPAULIN_EXIT=${PIPESTATUS[0]}
+set -e
+
+if [ "$TARPAULIN_EXIT" -ne 0 ]; then
+  echo "::error ::tarpaulin failed or no tests found (exit $TARPAULIN_EXIT)" | tee -a "$LOG_FILE"
   exit 1
-}
-echo "$TARPAULIN_OUTPUT" | tee -a "$LOG_FILE"
+fi
 
 echo "✅ Coverage generated successfully" | tee -a "$LOG_FILE"
 
-# Parse the coverage percentage from tarpaulin output (line like "X.XX% coverage")
-COVERAGE=$(echo "$TARPAULIN_OUTPUT" | grep -oP '\d+\.\d+(?=% coverage)' | tail -1)
+# Parse coverage from the saved raw log (line like "X.XX% coverage")
+COVERAGE=$(grep -oP '\d+\.\d+(?=% coverage)' "$TARPAULIN_RAW_LOG" | tail -1)
 
 if [ -z "$COVERAGE" ]; then
   echo "::error ::Could not parse coverage percentage from tarpaulin output" | tee -a "$LOG_FILE"
