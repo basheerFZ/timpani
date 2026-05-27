@@ -29,6 +29,7 @@ mkdir -p "$COVERAGE_ROOT/workspace"
 
 TARPAULIN_OUTPUT=$(cargo tarpaulin --packages timpani-n timpani-o --out Html --out Lcov --out Xml \
   --output-dir "$COVERAGE_ROOT/workspace" \
+  --config tarpaulin.toml \
   --ignore-panics --no-fail-fast \
   2>&1) || {
   echo "$TARPAULIN_OUTPUT" | tee -a "$LOG_FILE"

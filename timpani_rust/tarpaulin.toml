@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright 2026 LG Electronics Inc.
+# SPDX-License-Identifier: MIT
+#
+# Tarpaulin coverage configuration.
+# See: https://github.com/xd009642/tarpaulin#config-file
+
+[default]
+# Serialise tests within each test binary — required because the sched tests
+# manipulate CPU affinity / scheduling attributes on the current PID and race
+# with each other when run in parallel threads.
+args = ["--test-threads", "1"]
+
+# Exclude files that cannot meaningfully be covered by unit tests.
+# Paths are relative to the Cargo workspace root (timpani_rust/).
+#
+#  - timpani-n/src/main.rs  : binary entry point; delegates immediately to run_app
+#  - timpani-o/src/main.rs  : application server startup; cannot be unit-tested
+#  - timpani-n/tests/*      : integration test bodies are marked #[ignore] in CI
+#                             (require a live Timpani-O); their lines inflate misses
+exclude-files = [
+    "timpani-n/src/main.rs",
+    "timpani-o/src/main.rs",
+    "timpani-n/tests/*",
+]
